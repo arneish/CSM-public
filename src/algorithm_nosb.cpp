@@ -1,14 +1,12 @@
 #include "csm.h"
-
+#include <omp.h>
 using namespace std;
 
+//#pragma GCC target("sse,sse2,sse3,ssse3,sse4,popcnt,abm,mmx,avx,tune=native")
 void freq_vertices()
-{
-	for (int i = 0; i < inp_graph.size(); i++)
-	{
-		frequent_vertices.push_back(false); //Initially, all vertices are NOT frequent
-	}
-	cerr << "Label_to_vertices size:" << label_to_vertices.size() << "\n";
+{	int p=0;
+	frequent_vertices.resize(inp_graph.size(), false); //Initialize all vertices as NOT frequent
+	cerr << "Label_to_vertices size: " << label_to_vertices.size() << "\n";
 	vector<int> label_to_freq(static_cast<int>(label_to_vertices.size()), 0);
 	int max_mapping = 0;
 	for (int i = 0; i < label_to_vertices.size(); i++) //labels being identified as [0, label_to_vertices.size()-1]
@@ -22,24 +20,21 @@ void freq_vertices()
 			freq_vert_patternind.push_back(id);
 
 			/*Constructing and storing the replica for the frequent pattern:*/
-			unordered_set<int> maps;
-			unordered_map<int, vector<pair<int, int>>> replica_adj_list;
+			vector<unordered_set<int>> mappings(1);
+			unordered_set<int> &maps = mappings[0];
+			unordered_map<int, set<edge_tuple>> replica_adj_list;
 			unordered_map<int, set<int>> vmaplist;
 			for (int j = 0; j < label_to_vertices[i].size(); j++) //iterating over all vertices of the frequent label[i]
 			{
 				frequent_vertices[label_to_vertices[i][j]] = true;
-				set<int> v_map = {0}; //pattern-vtxID is trivially zero
-				vmaplist[label_to_vertices[i][j]] = v_map;
-				vector<pair<int, int>> empty_adj_list_;
-				replica_adj_list[label_to_vertices[i][j]] = empty_adj_list_;
+				vmaplist[label_to_vertices[i][j]] = {0}; //pattern-vtxID is trivially zero
+				replica_adj_list[label_to_vertices[i][j]] = {};
 				maps.insert(label_to_vertices[i][j]); // "maps": stores all vtxID's of freq label[i]
 			}
-			vector<unordered_set<int>> mappings = {maps};
-			replica_s *replica_ = new replica_s(mappings, replica_adj_list, vmaplist); //"replica_": replica for the frequent label
+			replica_s *replica_ = new replica_s(mappings, replica_adj_list, vmaplist); //"replica_": replica structure for frequent vertex
 
 			/*Constructing the frequent pattern graph and the subgraph_pattern data structure:*/
-			vector<pair<int, int>> empty_adj_list;
-			vector<vector<pair<int, int>>> graph_ = {empty_adj_list};
+			vector<vector<pair<int, int>>> graph_(1);
 			vector<int> vertices_to_labels = {i};
 			int support = label_to_vertices[i].size();
 			int min_index = 0;
@@ -66,7 +61,7 @@ void freq_vertices()
 
 void modify_adjlist()
 {
-	//NOTE: only deletion from Adjacency Lists; no vertex deletion to maintain original vertex-ID's
+	//NOTE: only deletion from input graph adjacency list; no vertex deletion to maintain original vertex-ID's
 	int edges_deleted = 0, pre_size, post_size;
 	for (auto &i : inp_graph)
 	{
@@ -78,8 +73,59 @@ void modify_adjlist()
 	cerr << "edges_deleted = " << edges_deleted << "\n";
 }
 
+void BFS(int &vertexID, vector<vector<pair<int, int>>> &graph, int &hop, set<int> *corv_set)
+{
+	unordered_set<int> visited = {vertexID};
+	list<pair<int, int>> queue = {make_pair(vertexID, 0)}; //(vertexID, level)
+	pair<int, int> &front = queue.front();
+	while (front.second < hop && !queue.empty())
+	{
+		queue.pop_front();
+		for (const auto &nbr : graph[front.first])
+		{
+			if (!visited.count(nbr.first))
+			{
+				visited.insert(nbr.first);
+				queue.push_back(make_pair(nbr.first, front.second + 1));
+			}
+		}
+		front = queue.front();
+	}
+	for (const auto &vertex : visited)
+	{
+		if (frequent_vertices[vertex])
+		{
+			corv_set->insert(vertex);
+		}
+	}
+}
+
 void compute_corv(vector<vector<pair<int, int>>> &graph, vector<set<int> *> &corv, int &hop)
 {
+	// while (true)
+	// {
+	// 	vector<set<int>> *v = new vector<set<int>>(100);
+	// 	(*v)[0] = {1,2,3,4,5,6, 7, 8, 9, 10, 11, 12, 13};
+	// 	delete v;
+	// }
+	// 	cerr<<"compute_corv executing:\n";
+	// 	corv.resize(graph.size(), nullptr);
+	// #pragma omp parallel for schedule(dynamic)
+	// 	for (int i=0; i<graph.size(); i++)
+	// 	{
+	// 		//cerr << "\r" << i << "/" << graph.size();
+	// 		set<int> *corv_set;
+	// 		if (frequent_vertices[i])
+	// 		{
+	// 			corv_set = new set<int>{i};
+	// 			BFS(i, graph, hop, corv_set);
+	// 		}
+	// 		corv[i]=corv_set;
+	// 	}
+	// 	cerr<<"completed\n";
+	// 	while (true)
+	// 	{}
+	// 	return;
 	/*//hop = 1 code:
     if (hop == 1) 
     {
@@ -95,57 +141,93 @@ void compute_corv(vector<vector<pair<int, int>>> &graph, vector<set<int> *> &cor
         return;
     } */
 	/*GENERAL CASE: hop >= 1 code:*/
-	vector<vector<set<int> *> *> list;
-	/*The i-th vector element is a hashmap of vertex-id to id's of its L-<i-th> neighbours
+	vector<set<int> *> *list_0 = new vector<set<int> *>(graph.size());
+	vector<set<int> *> *list_1 = new vector<set<int> *>(graph.size());
+	/*The i-th vector element is a mapping of pattern vertex-id to id's of its L-<i+1-th> neighbours
       L-0 ("Level"-0) for a vertex is the vertex itself, L-1 is the set of immediate neighbours + itself and so on. */
-	list.push_back(new vector<set<int> *>);
+	//list.push_back(new vector<set<int> *>);
 	for (int i = 0; i < graph.size(); i++)
 	{
-		set<int> *L1 = new set<int>{i};
-		for (auto &j : graph[i])
+		if (frequent_vertices[i])
 		{
-			L1->insert(j.first);
+			list_0->at(i) = new set<int>;
+			for (const auto &j : graph[i])
+			{
+				list_0->at(i)->insert(j.first);
+			}
 		}
-		list[0]->push_back(L1); //L-1 neighbours stored in list
+		//list_0->push_back(L1);
+		//list[0]->push_back(L1); //L-1 neighbours stored in list at index 0
 	}
 	for (int i = 1; i < hop; i++)
 	{
 		cerr << "hop#: " << i + 1 << "\n";
-		list.push_back(new vector<set<int> *>);
-		corvtraverse(graph, list[i - 1], list[i]);
+		corvtraverse(i + 1, hop, graph, list_0, list_1);
 		cerr << "clearing list: L-" << i << "\n";
-		for (auto &corv_set : *list[i - 1])
+		for (int i = 0; i < graph.size(); i++)
 		{
-			delete corv_set;
+			delete list_0->at(i);
 		}
-		list[i - 1]->clear();
-		delete list[i - 1];
+		list_0->clear();
+		assert(list_0->size() == 0);
+		delete list_0;
+		list_0 = list_1;
+		assert(list_0->size() == graph.size());
+		list_1 = new vector<set<int> *>(graph.size());
 	}
 	int total_corv_size = 0;
 	for (int i = 0; i < graph.size(); i++) //inserting into corv:
 	{
-		set<int> *corv_members = list[hop - 1]->at(i);
-		corv.push_back(corv_members);
-		total_corv_size += corv_members->size();
+		corv.push_back(list_0->at(i));
+		if (frequent_vertices[i])
+			total_corv_size += list_0->at(i)->size();
 	}
-	cerr << "Total corV size: " << total_corv_size << "\n";
-	// cerr << "UNIX Pause_\n";
-	// sleep(pause_);
-	// sleep(pause_);
+	cout << "Total corV size: " << total_corv_size << "\n";
+	cout << "Average corV size: " << total_corv_size / graph.size() << "\n";
 }
 
-void corvtraverse(vector<vector<pair<int, int>>> &graph, vector<set<int> *> *corvmap, vector<set<int> *> *corvmap2)
+void corvtraverse(int current_hop, int max_hop, vector<vector<pair<int, int>>> &graph, vector<set<int> *> *corvmap, vector<set<int> *> *corvmap2)
 {
+	// 	if (current_hop==max_hop)
+	// 	{
+	// // #pragma omp parallel for schedule (dynamic)
+	// 		for (int i = 0; i < graph.size(); i++)
+	// 		{
+	// 			//cerr<<"\r"<<i<<"/"<<graph.size();
+	// 			//set<int> *s;
+	// 			if (frequent_vertices[i])
+	// 			{
+	// 				//s = new set<int>{i};
+	// 				corvmap2->at(i).insert(i);
+	// 				//corvmap2->push_back(s);
+	// 				for (auto &nbr : graph[i])
+	// 				{
+	// 					corvmap2->at(i).insert(corvmap->at(nbr.first).begin(), corvmap->at(nbr.first).end());
+	// 				}
+	// 			}
+	// 			// else
+	// 			// {
+	// 			// 	corvmap2->push_back(s);
+	// 			// }
+	// 		}
+	// 		return;
+	// 	}
+
+	//#pragma omp parallel for //schedule (static)
 	for (int i = 0; i < graph.size(); i++)
 	{
-		cerr << "\r" << i << "/" << graph.size() << " ";
-		corvmap2->push_back(new set<int>{i});
-		for (auto &nbr : graph[i])
+		if (frequent_vertices[i])
 		{
-			corvmap2->at(i)->insert(corvmap->at(nbr.first)->begin(), corvmap->at(nbr.first)->end());
+			cerr << "\r" << i << "/" << graph.size();
+			//corvmap2->push_back(new set<int> {i});
+			corvmap2->at(i)=new set<int>{i};
+			for (auto &nbr : graph[i])
+			{
+				corvmap2->at(i)->insert(corvmap->at(nbr.first)->begin(), corvmap->at(nbr.first)->end());
+			}
 		}
 	}
-	cerr << "\n";
+	//assert(corvmap2->size()==graph.size());
 }
 
 void search()
@@ -153,44 +235,68 @@ void search()
 	int count = 0;
 	while (!ceasing_condition())
 	{
+		clock_t start = clock();
+		//cout<<"search counter: "<<++search_counter<<", q: ";
 		cerr << "Ceasing condition not met. Search loop counter: " << ++count
 			 << "\nLeaf Size: " << leaf.size() << ", Top-k size: " << top_k.size() << "/" << k << "\n";
 		subgraph_pattern q = leaf.top();
+		cout << q.strdfscode << ", post-op: ";
 		leaf.pop();
 		patternSizeToCount[q.graph.size()] += 1;
 		operate(q);
+		//double project_time = (double)(clock() - project_start_time) / CLOCKS_PER_SEC;
+		//cout<<project_time<<", post-ex: ";
 		cerr << "Post operate() Top-k size: " << top_k.size() << "\n";
 		extend(q);
 		cerr << "Post extend() Leaf size:" << leaf.size() << "\n";
+		//project_time = (double)(clock() - project_start_time) / CLOCKS_PER_SEC;
+		//cout<<project_time<<"s, top-k-size: "<<top_k.size()<<"\n";
 	}
 }
 
 inline bool ceasing_condition()
 {
 	if (top_k.size() == k && leaf.top().support <= top_k.top().corr_value)
+	{
+		cout << " proper ceasing condition met\n";
 		return true;
+	}
 	else if (leaf.empty())
+	{
+		cout << " leaf empty ceasing condition met\n";
 		return true;
+	}
 	return false;
 }
 
 void operate(subgraph_pattern &q)
 {
+	/*In operate(), correlation computation is performed on the input pattern in two steps: 
+	1. "collect" IDs of proximal patterns 
+	2. Perform correlation computation between the current pattern against all existing 
+	"operated patterns" using the results of the collect phase; also top-k heap may be updated*/
 	int operated_size = operated.size();
 	cerr << "operate() call:\n";
 	unordered_map<int, set<int>> collection;
-	//"collection": key: ID of mapping of center-ID, value: set of proximal patternIDs for that mapping
-	constructcollectstat(q, q.min_index, collection);
+	/*"collection": key=ID of mapping of center-ID, value={proximal patternIDs for that mapping}*/
+	if (control)
+	{
+		constructcollectstat(q, q.min_index, collection);
+	}
+	else
+	{
+		constructcollectstat_orig(q, q.min_index, collection);
+	}
 	for (int i = 0; i < operated_size; i++)
 	{
-		if (q.subgraphs.find(operated[i].id) == q.subgraphs.end() && q.replica->mappings.size() > 1)
+		if (q.graph.size() > 1 && !q.subgraphs.count(operated[i].id)) //correlation count between single-vertex patterns is avoided
 		{
-			int pattern_ind = operated[i].id;
+			int &pattern_ind = operated[i].id;
 			unordered_set<int> &root_mappings = q.replica->mappings[q.min_index];
 			int count = 0;
 			for (auto it : root_mappings)
 			{
-				if (collection[it].find(pattern_ind) != collection[it].end())
+				if (collection[it].count(pattern_ind))
 					count++;
 			}
 			if (top_k.size() < k && count > 0)
@@ -207,6 +313,84 @@ void operate(subgraph_pattern &q)
 		}
 	}
 	operated.push_back(q);
+}
+
+void constructcollectstat_orig(subgraph_pattern &q, int centerID, unordered_map<int, set<int>> &collectSetMap)
+{
+	vector<vector<pair<int, int>>> &Q_graph = q.graph;
+	vector<unordered_set<int>> &Q_mappings = q.replica->mappings;
+	/*construct DFS-order from centerID*/
+	vector<struct edge *> *dfslist = q.dfsordercons(centerID);
+
+	int map_counter = 0;
+	unordered_set<int> group_members; /*to store all vertex-IDs constituting an instance group corresponding to an instance center*/
+	for (const auto &mapped_centerID : Q_mappings[centerID])
+	{
+		group_members.clear();
+		if (q.graph.size() >= 3)
+		{
+			cerr << "\r" << map_counter++ << "/" << Q_mappings[centerID].size();
+		}
+		allinstances_collectstat_orig(q, dfslist, centerID, mapped_centerID, group_members);
+		/*
+		1. Aggregate proximal pattern IDs for every instance group
+		2. Assign self-patternID to all vertices within the hop of every vertex constituting the instance group 
+		*/
+		set<int> &proximal_patterns = collectSetMap[mapped_centerID];
+		for (const auto &vertex : group_members)
+		{
+			proximal_patterns.insert(corP[vertex].begin(), corP[vertex].end());
+			for (auto &corv_vertex : *corvm[vertex])
+			{ //put self-patternID in all of corV for this vertex
+				corP[corv_vertex].insert(q.id);
+			}
+		}
+	}
+}
+
+void allinstances_collectstat_orig(subgraph_pattern &q, vector<struct edge *> *dfslist, int &center_ID, int center_vertexID, unordered_set<int> &group_members)
+{
+	unordered_map<int, int> instance; // <patternvtxID, replicavtxID (mapping)>
+	instance[center_ID] = center_vertexID;
+	set<int> instance_set = {center_vertexID};
+	int list_index = 1; //start DFS-wise instance enumeration from dfslist[1] (dfslist[0] is <center-vertex, -1>)
+	DFS_instance_all_collectstat_orig(q, list_index, dfslist, instance, instance_set, group_members);
+}
+
+void DFS_instance_all_collectstat_orig(subgraph_pattern &q, int list_index, vector<struct edge *> *dfslist, unordered_map<int, int> &instance, set<int> &instance_set, unordered_set<int> &group_members)
+{
+
+	/* base case: */
+	if (list_index == dfslist->size())
+	{
+		//dfslist has been traversed till the end
+		for (auto &instance_mapping : instance)
+		{
+			group_members.insert(instance_mapping.second);
+		}
+		return;
+	}
+	/* recursion: */
+	/*If first-visit then store set of all possible child-mapping vertices, else iterate over existing set of (remaining) potential child mappings*/
+	int &parent_patternID = dfslist->at(list_index)->parent; //vertex-ID of parent vertex in the pattern graph
+	int &parent_vertexID = instance[parent_patternID];
+	int &child_patternID = dfslist->at(list_index)->child; //vertex-ID of child vertex (wrt DFS list order) in the pattern graph
+	int &edge_label = dfslist->at(list_index)->edge_label;
+
+	/*iterate over (remaining) potential child mappings and attempt to enumerate instances*/
+	for (const auto &child : q.replica->adj_list[parent_vertexID])
+	{
+		if (q.replica->vmaplist[child.first].count(child_patternID) && (child.second == edge_label))
+		{
+			if (instance_set.count(child.first))
+				continue;
+			instance[child_patternID] = child.first;
+			instance_set.insert(child.first);
+			DFS_instance_all_collectstat_orig(q, list_index + 1, dfslist, instance, instance_set, group_members);
+			instance.erase(child_patternID);
+			instance_set.erase(child.first);
+		}
+	}
 }
 
 void constructcollectstat(subgraph_pattern &q, int centerID, unordered_map<int, set<int>> &collectSetMap)
@@ -230,17 +414,12 @@ void constructcollectstat(subgraph_pattern &q, int centerID, unordered_map<int, 
 			leaves.push_back(i);
 		}
 	}
-	q.replica->enumerated_mappings.clear();
 	q.replica->enumerated_mappings.resize(q.graph.size(), unordered_set<int>());
 	int map_counter = 0;
 	unordered_set<int> group_members; /*to store all vertex-IDs constituting an instance group corresponding to an instance center*/
 	for (const auto &mapped_centerID : Q_mappings[centerID])
 	{
 		group_members.clear();
-		if (q.graph.size() >= 3)
-		{
-			cerr << "\r" << map_counter++ << "/" << Q_mappings[centerID].size();
-		}
 		allinstances_collectstat(q, dfslist, centerID, mapped_centerID, group_members);
 		/*
 		1. Aggregate proximal pattern IDs for every instance group
@@ -262,6 +441,7 @@ void constructcollectstat(subgraph_pattern &q, int centerID, unordered_map<int, 
 	q.replica->first_visit.erase(q.replica->first_visit.begin(), q.replica->first_visit.end());
 	q.replica->potential_child_mapping.erase(q.replica->potential_child_mapping.begin(), q.replica->potential_child_mapping.end());
 	q.replica->confirmed_child_mapping.erase(q.replica->confirmed_child_mapping.begin(), q.replica->confirmed_child_mapping.end());
+	q.replica->enumerated_mappings.clear();
 }
 
 void allinstances_collectstat(subgraph_pattern &q, vector<struct edge *> *dfslist, int &center_ID, int center_vertexID, unordered_set<int> &group_members)
@@ -273,11 +453,12 @@ void allinstances_collectstat(subgraph_pattern &q, vector<struct edge *> *dfslis
 	DFS_instance_all_collectstat(q, list_index, dfslist, instance, instance_set, group_members);
 }
 
-int DFS_instance_all_collectstat(subgraph_pattern &q, int list_index, vector<struct edge *> *dfslist, unordered_map<int, int> &instance, set<int> &instance_set, unordered_set<int> &group_members)
+bool DFS_instance_all_collectstat(subgraph_pattern &q, int list_index, vector<struct edge *> *dfslist, unordered_map<int, int> &instance, set<int> &instance_set, unordered_set<int> &group_members)
 {
 	/*returns true iff at least one instance found*/
 
 	bool local_found = false; //"true" iff including current child_mapping results in at least one valid instance
+
 	/* base case: */
 	if (list_index == dfslist->size())
 	{
@@ -292,6 +473,7 @@ int DFS_instance_all_collectstat(subgraph_pattern &q, int list_index, vector<str
 		}
 		return local_found = true;
 	}
+
 	/* recursion: */
 	/*If first-visit then store set of all possible child-mapping vertices, else iterate over existing set of (remaining) potential child mappings*/
 	int &parent_patternID = dfslist->at(list_index)->parent; //vertex-ID of parent vertex in the pattern graph
@@ -302,14 +484,12 @@ int DFS_instance_all_collectstat(subgraph_pattern &q, int list_index, vector<str
 	unordered_set<int> &confirmed_set = q.replica->confirmed_child_mapping[to_string(parent_vertexID) + ' ' + to_string(child_patternID)];
 
 	if (!q.replica->first_visit[to_string(parent_patternID) + ' ' + to_string(child_patternID)].count(parent_vertexID))
-	{
-		//this is the first-visit at pattern_vertexID for this edge-type
+	{ //First-visit at pattern_vertexID for this edge-type
 		for (const auto &edge : q.replica->adj_list[parent_vertexID])
 		{
 			if (q.replica->vmaplist[edge.first].count(child_patternID) && edge.second == edge_label)
 			{
-				potential_set.insert(edge.first);
-				/*store the set of potentially-valid child mappings*/
+				potential_set.insert(edge.first); /*store the set of potentially-valid child mappings*/
 			}
 		}
 		q.replica->first_visit[to_string(parent_patternID) + ' ' + to_string(child_patternID)].insert(parent_vertexID);
@@ -325,17 +505,17 @@ int DFS_instance_all_collectstat(subgraph_pattern &q, int list_index, vector<str
 		instance_set.insert(child_mapping);
 		bool instanceFound = DFS_instance_all_collectstat(q, list_index + 1, dfslist, instance, instance_set, group_members);
 		if (instanceFound)
-			local_found = true;
-		/*Check if child_mapping is "completely-enumerated"*/
-		if (instanceFound && q.replica->enumerated_mappings[child_patternID].count(child_mapping))
 		{
-			add_to_confirmed.insert(child_mapping);
-			//to be deleted from potential_child_mapping and move to confirmed_child_mapping
+			local_found = true;
+			/*Check if child_mapping is "completely-enumerated"*/
+			if (q.replica->enumerated_mappings[child_patternID].count(child_mapping))
+			{
+				add_to_confirmed.insert(child_mapping); //to be deleted from potential_child_mapping and moved to confirmed_child_mapping
+			}
 		}
 		instance.erase(child_patternID);
 		instance_set.erase(child_mapping);
 	}
-
 	if (!local_found)
 	{
 		/*in this case (i.e. not a single valid instance found using potential set), 
@@ -385,64 +565,29 @@ int DFS_instance_all_collectstat(subgraph_pattern &q, int list_index, vector<str
 
 void extend(subgraph_pattern &q)
 {
-	//try to call minDFS once only here
 	cerr << "extend() call:\n";
 	vector<vector<pair<int, int>>> &Q_graph = q.graph;
 	vector<int> &Q_vertices_to_labels = q.vertices_to_labels;
-	vector<LL> extensions;
+	unordered_set<LL> extensions;
 	possible_extensions_(q, extensions);
+	cout << " extensions-size: " << extensions.size() << " ";
 	int extensions_size = extensions.size();
 	cerr << "Candidate extensions size: " << extensions_size << "\n";
 	pair<int, int> sup_ind_org = support_index(q.replica);
 	int &support_org = sup_ind_org.first;
 	int &min_index_org = sup_ind_org.second;
-	for (int i = 0; i < extensions.size(); i++)
-	{
-		cerr << "Candidate extn #" << i + 1 << ": " << extensions[i] << "\n";
-	}
 
-	/*check size of q and same label or not*/
-	// bool allLabelSame = true;
-	// int label = q.vertices_to_labels[0];
-	// for (int i = 1; i < q.graph.size(); i++)
-	// {
-	// 	if (label != q.vertices_to_labels[i])
-	// 	{
-	// 		allLabelSame = false;
-	// 		break;
-	// 	}
-	// }
-
-	for (int i = 0; i < extensions_size; i++)
+	for (const auto &extension : extensions)
 	{
-		cerr << "extension: " << i + 1 << "/" << extensions_size << ": ";
-		LL extension_ = extensions[i];
+		//cerr << "extension: " << i + 1 << "/" << extensions_size << ": ";
+		LL extension_ = extension;
 		int vert_id = extension_ % 1000;
 		extension_ /= 1000;
 		int edge_label = extension_ % 10000;
 		extension_ /= 10000;
 		int extended_label = extension_;
 		cerr << " vert_id: " << vert_id << " edge_l: " << edge_label << " extended_l: " << extended_label << "\n";
-		// if (q.graph.size() >= 5 && allLabelSame)
-		// {
-		// 	if (extended_label == label)
-		// 	{
-		// 		cerr << "Extended_label same as all vertex labels - SKIPPING EXTENSION \n";
-		// 		continue;
-		// 	}
-		// }
-		// else if (q.graph.size() == 3)
-		// {
-		// 	continue;
-		// }
-
-		// if (q.graph.size() == 5)
-		// {
-		// 	continue;
-		// }
-		// if (q.graph.size() == 4 && allLabelSame)
-		// 	continue;
-
+	
 		/* Construct the candidate pattern graph (tree): */
 		vector<vector<pair<int, int>>> candidate_graph = q.graph;
 		int N = candidate_graph.size();
@@ -482,7 +627,49 @@ void extend(subgraph_pattern &q)
 
 		/* Since pattern is absent in dictionary, construct replica and get support: */
 		cerr << "GET_REPLICA call:\n";
-		replica_s *replica = get_replica_brute(q, vert_id, extended_label, edge_label);
+		replica_s *replica;
+		if (control)
+		{
+			replica = get_replica_brute(q, vert_id, extended_label, edge_label);
+		}
+		else
+		{
+			replica = get_replica_brute_orig(q, vert_id, extended_label, edge_label);
+		}
+		// replica_s *replica_complete = get_replica_brute_orig(q, vert_id, extended_label, edge_label);
+		// for (int i = 0; i < replica_complete->mappings.size(); i++)
+		// {
+		// 	cout << i << ": " << replica->mappings[i].size() << "|" << replica_complete->mappings[i].size() << "\n";
+		// }
+		// for (int i = 0; i < replica_complete->mappings.size(); i++)
+		// {
+		// 	if (replica->mappings[i].size() != replica_complete->mappings[i].size())
+		// 	{
+		// 		cout << "fail:" << replica->mappings[i].size() << "|" << replica_complete->mappings[i].size() << "\n";
+		// 		for (auto &elem : replica_complete->mappings[i])
+		// 		{
+		// 			if (!replica->mappings[i].count(elem))
+		// 			{
+		// 				cout << elem << ": ";
+		// 				for (auto &mapping : replica->vmaplist[elem])
+		// 				{
+		// 					cout << mapping << ", ";
+		// 				}
+		// 				cout << "||";
+		// 				for (auto &mapping : replica_complete->vmaplist[elem])
+		// 				{
+		// 					cout << mapping << ", ";
+		// 				}
+
+		// 				cout << "\n";
+		// 			}
+		// 		}
+		// 		cout << "\n";
+		// 		exit(0);
+		// 	}
+		// }
+		// delete replica_complete;
+
 		cerr << "---------------------------\n";
 		assert(q.replica->mappings.size() == replica->mappings.size() - 1);
 		pair<int, int> sup_ind = support_index(replica);
@@ -498,42 +685,29 @@ void extend(subgraph_pattern &q)
 			candidate.subgraphs.insert(q.id);
 			candidate.subgraphs.insert(q.subgraphs.begin(), q.subgraphs.end());
 			candidate.subgraphs.insert(freq_vert_patternind.begin(), freq_vert_patternind.end());
-			patternSizeToCount2[candidate.graph.size()] += 1;
-			write_pattern(candidate.graph, candidate.vertices_to_labels, frequent_txt, global_num_patterns, candidate_DFSCode);
+			write_pattern(candidate.graph, candidate.vertices_to_labels, output_txt, global_num_patterns, candidate_DFSCode);
+			output_txt << "(rm-path: ";
+			for (int j = 0; j < rm_path.size(); j++)
+				output_txt << rm_path[j] << " ";
+			output_txt << ")\n";
 			leaf.push(candidate);
 			global_num_patterns++;
 		}
 		else
 		{
-			cerr<<"deleting replica\n";
+			cerr << "deleting replica\n";
 			delete replica;
 		}
 	}
 	delete q.replica;
 }
 
-void possible_extensions_(subgraph_pattern &q, vector<LL> &all_extensions)
+void possible_extensions_(subgraph_pattern &q, unordered_set<LL> &all_extensions)
 {
-	//check if need to write a dfs code for a vertex
 	cerr << "possible extensions called:\n";
 	replica_s *replica = q.replica;
 	vector<int> &rightmost_path = q.rightmost_path;
-	unordered_set<LL> extensions;
-	/*
-	cerr << " printing Q:\n";
-	for (int i = 0; i < q.graph.size(); i++)
-	{
-		cerr << i << ":";
-		for (int j = 0; j < q.graph[i].size(); j++)
-		{
-			cerr << q.graph[i][j].first << ",";
-		}
-		cerr << "\n";
-	}
-	cerr << "DFS code is:" << q.strdfscode << "\n";
-	cerr << "support is:" << q.support << "\n";
-	sleep(pause_);
-	*/
+	//unordered_set<LL> extensions;
 	for (int i = 0; i < rightmost_path.size(); i++)
 	{
 		unordered_set<int> &mappings = replica->mappings[rightmost_path[i]];
@@ -548,18 +722,19 @@ void possible_extensions_(subgraph_pattern &q, vector<LL> &all_extensions)
 			{
 				pair<int, int> &edge = adj_list[j];
 				LL extension_index = (LL)vertices_to_labels[edge.first] * (int)(pow(10, 7) + 0.5) + edge.second * 1000 + rightmost_path[i];
-				if (extensions.count(extension_index))
+				if (all_extensions.count(extension_index))
 					continue;
 				bool ans = instance_checkerDFS(q, dfslist, rightmost_path[i], vert_id, edge.first);
 				if (ans)
 				{
 					assert(extension_index >= 0); //overflow-check
-					extensions.insert(extension_index);
+					//cout<<extension_index<<"\n";
+					all_extensions.insert(extension_index);
 				}
 			}
 		}
 	}
-	copy(extensions.begin(), extensions.end(), back_inserter(all_extensions));
+	//copy(extensions.begin(), extensions.end(), back_inserter(all_extensions));
 }
 
 bool instance_checkerDFS(subgraph_pattern &q, vector<struct edge *> *dfslist, int &extending_index, const int &extending_index_graphID, int &conflict_ID)
@@ -610,7 +785,7 @@ bool DFS_instance(subgraph_pattern &q, int list_index, vector<struct edge *> *df
 
 pair<int, int> support_index(replica_s *replica)
 {
-	// returns the pair<MNI support, corresponding index> for the pattern from its replica
+	/*returns the pair<MNI support, corresponding index> for the pattern from its replica*/
 	int min_mapping_size = INT_MAX;
 	int index = -1;
 	for (int i = 0; i < replica->mappings.size(); i++)
@@ -626,23 +801,12 @@ pair<int, int> support_index(replica_s *replica)
 	return temp;
 }
 
-/* Set-A: CSM-approximate replica-extension: */
+/*Set-A: CSM-approximate replica-extension: */
 replica_s *get_replica_brute(subgraph_pattern &q, int extending_index, int extended_label, int edge_label)
 {
 	assert(extending_index >= 0 && extended_label >= 0 && edge_label >= 0);
-	cerr << "Replica call: extending index| extended label| edge label::" << extending_index << " " << extended_label << " " << edge_label << "\n";
-	cerr << "top-k size:" << top_k.size() << "/" << k << "\n";
-	cerr << "Parent support: " << q.support << "\n";
-	for (int index = 0; index < q.graph.size(); index++)
-	{
-		cerr << q.vertices_to_labels[index] << " :";
-		for (auto &neighbour : q.graph[index])
-		{
-			cerr << q.vertices_to_labels[neighbour.first] << "(" << neighbour.second << ")"
-				 << ",";
-		}
-		cerr << "\n";
-	}
+	cout <<"\rreplica call: extending index| extended label| edge label::" << extending_index << " " << extended_label << " " << edge_label;
+	//cout << "Parent-pattern: " << q.strdfscode << "\n";
 
 	/*All structures: */
 	//A. for parent replica:
@@ -667,34 +831,30 @@ replica_s *get_replica_brute(subgraph_pattern &q, int extending_index, int exten
 		}
 	}
 	parent_replica->enumerated_mappings.resize(parent_graph->size());
-	
+
 	//B. for candidate replica ("new replica"):
-	replica_s *new_replica = new replica_s(parent_replica->adj_list, parent_graph->size());
+	replica_s *new_replica = new replica_s(parent_replica->adj_list);
 	vector<unordered_set<int>> &new_replica_mappings = new_replica->mappings;
 	new_replica_mappings.resize(q.graph.size() + 1); //NOTE: new_replica_mappings size is +1 original pattern size for storing extension mappings.
-	
-	/* Iterating extending index mappings: */
+
+	/*Iterating over extending index mappings: */
 	int ext_siz = 0;
-	bool found = false; //valid-extension
+	bool global_found; //valid-extension
 	for (const auto &mapped_extending : (*parent_mappings)[extending_index])
 	{
-		if (parent_graph->size() >= 3)
-			cerr << "\r" << ++ext_siz << "/" << (*parent_mappings)[extending_index].size();
-		pattern_sizes.push_back((*parent_graph).size());
-		pfile << (*parent_graph).size() << "\n";
-		found = false;
+		global_found = false;
 		for (const auto &input_nbr : inp_graph[mapped_extending])
 		{
 			if ((vertices_to_labels[input_nbr.first] == extended_label) && (input_nbr.second == edge_label))
 			{
-				found = false; //Is set to true if at least one valid instance found with the chosen "extension edge mapping"
+				//"global_found": is true iff at least one valid instance is found with the chosen "extension edge mapping"
 				/*Enumerate all instances (using DFS) with the chosen "extension edge mapping":*/
-				instance_allDFS(q, dfslist, extending_index, mapped_extending, input_nbr.first, new_replica_mappings, found); 
-				if (found) 
-				{	/*At least one valid instance found with the chosen "extension edge mapping"*/
+				global_found = instance_allDFS(q, dfslist, extending_index, mapped_extending, input_nbr.first, new_replica_mappings);
+				if (global_found)
+				{ /*At least one valid instance found with the chosen "extension edge mapping"*/
 					new_replica_mappings[parent_graph->size()].insert(input_nbr.first);
-					new_replica->adj_list[mapped_extending].push_back(input_nbr);
-					new_replica->adj_list[input_nbr.first].push_back(make_pair(mapped_extending, edge_label));					
+					new_replica->adj_list[mapped_extending].insert(input_nbr);
+					new_replica->adj_list[input_nbr.first].insert(make_pair(mapped_extending, edge_label));
 				}
 			}
 		}
@@ -717,25 +877,57 @@ replica_s *get_replica_brute(subgraph_pattern &q, int extending_index, int exten
 	return new_replica;
 }
 
-void instance_allDFS(subgraph_pattern &q, vector<struct edge *> *dfslist, int &extending_index, const int &extending_index_vertexID, const int &conflict_ID, vector<unordered_set<int>> &new_mappings, bool &found)
+bool instance_allDFS(subgraph_pattern &q, vector<struct edge *> *dfslist, int &extending_index, const int &extending_index_vertexID, const int &conflict_ID, vector<unordered_set<int>> &new_mappings)
 {
-	unordered_map<int, int> instance; // key: pattern_vtxID, value: replica_vtxID (=input_graph_vtxID)
-	instance[extending_index] = extending_index_vertexID;
+	unordered_map<int, int> instance = {{extending_index, extending_index_vertexID}}; // key: pattern_vtxID, value: replica_vtxID (=input_graph_vtxID)
 	set<int> instance_set = {extending_index_vertexID};
 	int list_index = 1; //start DFS-wise instance enumeration from dfslist[1] (dfslist[0] is <extending_index, -1>)
-	DFS_instance_all(q, list_index, dfslist, instance, instance_set, conflict_ID, new_mappings, found);
+	bool OneInstanceFound = DFS_instance_all(q, list_index, dfslist, instance, instance_set, conflict_ID, new_mappings);
+	return OneInstanceFound; //confirms that the "extending vertex<->extended vertex" pair is associated with at least one valid instance mapping
 }
 
-int DFS_instance_all(subgraph_pattern &q, int list_index, vector<struct edge *> *dfslist, unordered_map<int, int> &instance, set<int> &instance_set, const int &conflict_ID, vector<unordered_set<int>> &new_mappings, bool &global_found)
+bool DFS_instance_all(subgraph_pattern &q, int list_index, vector<struct edge *> *dfslist, unordered_map<int, int> &instance, set<int> &instance_set, const int &conflict_ID, vector<unordered_set<int>> &new_mappings)
 {
-	/*returns true iff at least one instance found*/
+	/*returns "local_found==true" iff at least one instance exists using child_mappings of the child ID at DFS-edge index "list_index"*/
 
 	bool local_found = false; //"true" iff including current child_mapping results in at least one valid instance
-	/* base case*/
+
+	/*base case*/
 	if (list_index == dfslist->size())
 	{
 		//dfslist has been traversed till the end
 		assert(instance.size() == dfslist->size());
+		// if (instance.size() == 3 && (instance[0] == 284||conflict_ID==284))
+		// {
+		// 	for (auto &instance_mapping : instance)
+		// 	{
+		// 		cout << instance_mapping.first << ":" << instance_mapping.second << ",";
+		// 	}
+		// 	cout<<" conflict:"<<conflict_ID;
+		// 	// cout << "\nconfirmed child of "<<instance[1]<<"for child 0: ";
+		// 	// for (auto &elem : q.replica->confirmed_child_mapping[to_string(instance[1])+" 0"])
+		// 	// {
+		// 	// 	cout<<elem<<", ";
+		// 	// }
+		// 	// cout << "\npotential child of "<<instance[1]<<"for child 0: ";
+		// 	// for (auto &elem : q.replica->potential_child_mapping[to_string(instance[1])+" 0"])
+		// 	// {
+		// 	// 	cout<<elem<<", ";
+		// 	// }
+		// 	// cout<<"\n";
+		// 	// cout << "\nconfirmed child of "<<instance[1]<<"for child 2: ";
+		// 	// for (auto &elem : q.replica->confirmed_child_mapping[to_string(instance[1])+" 2"])
+		// 	// {
+		// 	// 	cout<<elem<<", ";
+		// 	// }
+		// 	// cout << "\npotential child of "<<instance[1]<<"for child 2: ";
+		// 	// for (auto &elem : q.replica->potential_child_mapping[to_string(instance[1])+" 2"])
+		// 	// {
+		// 	// 	cout<<elem<<", ";
+		// 	// }
+		// 	cout<<"\n";
+		// }
+
 		for (auto &instance_mapping : instance)
 		{
 			new_mappings[instance_mapping.first].insert(instance_mapping.second);
@@ -744,11 +936,10 @@ int DFS_instance_all(subgraph_pattern &q, int list_index, vector<struct edge *> 
 		{
 			q.replica->enumerated_mappings[leaf_vertex].insert(instance[leaf_vertex]);
 		}
-		global_found = true;
 		return local_found = true;
 	}
-	
-	/* recursion */
+
+	/*recursion */
 	/*If first-visit then store set of all possible child-mapping vertices, else iterate over existing set of remaining potential child mappings*/
 	int &parent_patternID = dfslist->at(list_index)->parent;
 	int &parent_vertexID = instance[parent_patternID];
@@ -758,14 +949,14 @@ int DFS_instance_all(subgraph_pattern &q, int list_index, vector<struct edge *> 
 	unordered_set<int> &confirmed_set = q.replica->confirmed_child_mapping[to_string(parent_vertexID) + ' ' + to_string(child_patternID)];
 
 	if (!q.replica->first_visit[to_string(parent_patternID) + ' ' + to_string(child_patternID)].count(parent_vertexID))
-	{ 
-		//this is the first-visit at pattern_vertexID for this edge-type
+	{
+		/*This is the first-visit at pattern_vertexID for this edge-type*/
 		for (const auto &edge : q.replica->adj_list[parent_vertexID])
 		{
-			if (q.replica->vmaplist[edge.first].count(child_patternID) && edge.second == edge_label) //&& edge.first!=conflict_ID)
+			if (q.replica->vmaplist[edge.first].count(child_patternID) && edge.second == edge_label)
 			{
 				potential_set.insert(edge.first);
-				/*store the set of potentially-valid child mappings*/
+				/*Store the set of potentially-valid child mappings*/
 			}
 		}
 		q.replica->first_visit[to_string(parent_patternID) + ' ' + to_string(child_patternID)].insert(parent_vertexID);
@@ -779,19 +970,19 @@ int DFS_instance_all(subgraph_pattern &q, int list_index, vector<struct edge *> 
 			continue;
 		instance[child_patternID] = child_mapping;
 		instance_set.insert(child_mapping);
-		bool instanceFound = DFS_instance_all(q, list_index + 1, dfslist, instance, instance_set, conflict_ID, new_mappings, global_found);
+		bool instanceFound = DFS_instance_all(q, list_index + 1, dfslist, instance, instance_set, conflict_ID, new_mappings);
 		if (instanceFound)
-			local_found = true;
-		/*Check if child_mapping is "completely-enumerated"*/
-		if (instanceFound && q.replica->enumerated_mappings[child_patternID].count(child_mapping))
 		{
-			add_to_confirmed.insert(child_mapping);
-			//to be deleted from potential_child_mapping and move to confirmed_child_mapping
+			local_found = true;
+			if (q.replica->enumerated_mappings[child_patternID].count(child_mapping))
+			{
+				/*Check if child_mapping is "completely-enumerated"*/
+				add_to_confirmed.insert(child_mapping); //to be deleted from potential_child_mapping and moved to confirmed_child_mapping
+			}
 		}
 		instance.erase(child_patternID);
 		instance_set.erase(child_mapping);
 	}
-
 	if (!local_found)
 	{
 		/*in this case (i.e. not a single valid instance found using potential set), 
@@ -802,7 +993,7 @@ int DFS_instance_all(subgraph_pattern &q, int list_index, vector<struct edge *> 
 				continue;
 			instance[child_patternID] = child_mapping;
 			instance_set.insert(child_mapping);
-			bool instanceFound = DFS_instance_all(q, list_index + 1, dfslist, instance, instance_set, conflict_ID, new_mappings, global_found);
+			bool instanceFound = DFS_instance_all(q, list_index + 1, dfslist, instance, instance_set, conflict_ID, new_mappings);
 			instance.erase(child_patternID);
 			instance_set.erase(child_mapping);
 			if (instanceFound)
@@ -812,7 +1003,7 @@ int DFS_instance_all(subgraph_pattern &q, int list_index, vector<struct edge *> 
 			}
 		}
 	}
-	
+
 	/*iterate over add_to_confirmed set and update potential_child_mapping (deletion) and confirmed_child_mapping (insertion) */
 	confirmed_set.insert(add_to_confirmed.begin(), add_to_confirmed.end());
 	for (auto &child_mapping : add_to_confirmed)
@@ -820,7 +1011,7 @@ int DFS_instance_all(subgraph_pattern &q, int list_index, vector<struct edge *> 
 		potential_set.erase(child_mapping);
 	}
 	add_to_confirmed.clear();
-	
+
 	/*if ALL left-over children sets are empty, parent-vertex is also completely enumerated FOR THE CORRESPONDING MAPPING */
 	bool ToBeMarkedEnumerated = true;
 	for (auto &child_pattern : q.replica->parent_to_child[parent_patternID])
@@ -837,94 +1028,39 @@ int DFS_instance_all(subgraph_pattern &q, int list_index, vector<struct edge *> 
 		q.replica->enumerated_mappings[parent_patternID].insert(parent_vertexID);
 	}
 	return local_found;
-	/* 
-	for (const auto &child : q.replica->adj_list[instance[dfslist[list_index].second]])
-	{
-		//"child" iterates over all valid mappings of children of the replica vertex chosen as the mappping of its parent in the (possible) instance under consideration
-		if (q.replica->vmaplist[child].count(dfslist[list_index].first))
-		{
-			//possibly valid mapping of child found
-			if (child == conflict_ID || instance_set.count(child))
-				continue;
-			instance[dfslist[list_index].first] = child;
-			instance_set.insert(child);
-			DFS_instance_all(q, list_index + 1, dfslist, instance, instance_set, conflict_ID, new_mappings, found);
-			instance.erase(dfslist[list_index].first);
-			instance_set.erase(child);
-		}
-	}
-	*/
 }
 
 /* Set-B: CSM-complete replica-extension: */
 replica_s *get_replica_brute_orig(subgraph_pattern &q, int extending_index, int extended_label, int edge_label)
 {
-	/* Extension of form A->E. "A#": A marked for retention. 
-    Some metadata prints: */
-	std::clock_t start;
-	double duration;
-	start = std::clock();
-	cerr << "BRUTE replica call: extending index| extended label| edge label::" << extending_index << " " << extended_label << " " << edge_label << "\n";
+	cout << "COMPLETE replica call: extending index| extended label| edge label::" << extending_index << " " << extended_label << " " << edge_label << "\n";
 	cerr << "Q:" << q.support << "\n";
 	cerr << "top-k size:" << top_k.size() << "/" << k << "\n";
-	int index = -1;
-	for (auto &pattern_vtx : q.graph)
-	{
-		index++;
-		cerr << q.vertices_to_labels[index] << " :";
-		for (auto &neighbour : pattern_vtx)
-		{
-			cerr << q.vertices_to_labels[neighbour.first] << "(" << neighbour.second << ")"
-				 << ",";
-		}
-		cerr << "\n";
-	}
+	print_pattern(q.graph, q.vertices_to_labels);
 
 	/* All structures: */
 	replica_s *parent_replica = q.replica;
 	vector<vector<pair<int, int>>> *Q_graph = &q.graph;
 	vector<unordered_set<int>> *Q_mappings = &q.replica->mappings;
-	bool found = false; //valid-extension
-	replica_s *new_replica = new replica_s(parent_replica->adj_list, Q_graph->size());
-	vector<unordered_set<int>> new_replica_mappings(q.graph.size() + 1); //will replace current new_replica->mappings at the end
-	//NOTE: new_replica_mappings size is +1 original pattern size. For extension mappings.
-	cout << "new_replica initialisation size: " << new_replica->adj_list.size() << " new_replica_mappings size: " << new_replica_mappings.size() << "\n";
-	cout << "new_replica_mappings.size prev:" << new_replica_mappings.size() << "\n";
+	replica_s *new_replica = new replica_s(parent_replica->adj_list);
+	vector<unordered_set<int>> &new_replica_mappings = new_replica->mappings;
+	new_replica_mappings.resize(q.graph.size() + 1); //NOTE: new_replica_mappings size is +1 original pattern size for storing extension mappings.
+
 	/* Iterating extending index mappings: */
 	int ext_siz = 0;
 	/*initialise first_visit members*/
 	vector<struct edge *> *dfslist = q.dfsordercons(extending_index);
-	cerr << "dfslist BRUTE_ORIG:\n";
-	for (auto &elem : *dfslist)
+	cout << "dfscode: ";
+	for (int i = 0; i < dfslist->size(); i++)
 	{
-		cerr << elem->parent << "-->" << elem->child << "=" << elem->edge_label << "\n";
+		cout << dfslist->at(i)->child << ",";
 	}
-
-	vector<vector<int>> parent_to_child(q.graph.size(), vector<int>());
-	for (int i = 1; i < dfslist->size(); i++)
-	{
-		unordered_set<int> temp;
-		q.replica->first_visit[to_string(dfslist->at(i)->parent) + '$' + to_string(dfslist->at(i)->child)] = temp;
-		parent_to_child[dfslist->at(i)->parent].push_back(dfslist->at(i)->child);
-	}
-	q.replica->parent_to_child = parent_to_child;
-	vector<int> leaves;
-	for (int i = 0; i < parent_to_child.size(); i++)
-	{
-		if (!parent_to_child[i].size())
-		{
-			leaves.push_back(i);
-		}
-	}
-	q.replica->leaf_vertexID = leaves;
-	vector<unordered_set<int>> enumerated_mappings(q.graph.size(), unordered_set<int>());
-	q.replica->enumerated_mappings = enumerated_mappings;
+	cout << "\n";
+	bool found = false; //valid-extension
 	for (const auto &mapped_extending : (*Q_mappings)[extending_index])
 	{
 		if (q.graph.size() >= 3)
-			cerr << "\r" << ext_siz++ << "/" << (*Q_mappings)[extending_index].size();
-		pattern_sizes.push_back((*Q_graph).size());
-		pfile << (*Q_graph).size() << "\n";
+			cout << "\r" << ext_siz++ << "/" << (*Q_mappings)[extending_index].size();
 		found = false;
 		for (auto &input_nbr : inp_graph[mapped_extending])
 		{
@@ -933,39 +1069,24 @@ replica_s *get_replica_brute_orig(subgraph_pattern &q, int extending_index, int 
 				found = false;
 				instance_allDFS_orig(q, dfslist, extending_index, mapped_extending, input_nbr.first, new_replica_mappings, found);
 				if (found)
-				{
-					new_replica_mappings[new_replica_mappings.size() - 1].insert(input_nbr.first);
-					new_replica->adj_list[mapped_extending].push_back(input_nbr);
-					if (new_replica->adj_list.count(input_nbr.first))
-						new_replica->adj_list[input_nbr.first].push_back(make_pair(mapped_extending, edge_label));
-					else
-					{
-						vector<pair<int, int>> adjlist_newvtx = {make_pair(mapped_extending, edge_label)};
-						// set<int> adjlist_newvtx = {mapped_extending};
-						new_replica->adj_list[input_nbr.first] = adjlist_newvtx;
-					}
+				{ /*At least one valid instance found with the chosen "extension edge mapping"*/
+					new_replica_mappings[Q_graph->size()].insert(input_nbr.first);
+					new_replica->adj_list[mapped_extending].insert(input_nbr);
+					new_replica->adj_list[input_nbr.first].insert(make_pair(mapped_extending, edge_label));
 				}
 			}
 		}
 	}
 	cout << "new_replica_mappings.size after:" << new_replica_mappings.size() << "\n";
 	/* Assign new_replica_mappings to current new_replica mappings and update vmaplist*/
-	new_replica->mappings = new_replica_mappings;
-	for (auto &map_iterator : new_replica->vmaplist)
-	{
-		set<int> empty;
-		map_iterator.second = empty;
-	}
 	for (int i = 0; i < new_replica_mappings.size(); i++)
 	{
-		cout << "new_replica_mappings[i].size:" << new_replica_mappings[i].size() << "\n";
 		for (const auto &set_elem : new_replica_mappings[i])
 		{
 			new_replica->vmaplist[set_elem].insert(i);
 		}
 	}
-	duration = (std::clock() - start) / (double)CLOCKS_PER_SEC;
-	cerr << "time: " << duration << '\n';
+
 	return new_replica;
 }
 
@@ -987,21 +1108,22 @@ void DFS_instance_all_orig(subgraph_pattern &q, int list_index, vector<struct ed
 		assert(instance.size() == dfslist->size());
 		for (auto &instance_mapping : instance)
 		{
-			if (instance.size() >= 3 && (instance[2] == 4045 || instance[2] == 4101))
-				cerr << instance_mapping.first << "::" << instance_mapping.second << "\n";
+			// if (instance.size() >= 3 && (instance[2] == 4045 || instance[2] == 4101))
+			// 	cerr << instance_mapping.first << "::" << instance_mapping.second << "\n";
 			new_mappings[instance_mapping.first].insert(instance_mapping.second);
 		}
 		found = true;
 		return;
 	}
+
 	/* recursion */
 	/*If not first-visit then store set of all possible child-mapping vertices, else iterate over existing set of remaining potential child mappings*/
-	int parent_patternID = dfslist->at(list_index)->parent;
-	int parent_vertexID = instance[parent_patternID];
-	int child_patternID = dfslist->at(list_index)->child;
-	int edge_label = dfslist->at(list_index)->edge_label;
+	int &parent_patternID = dfslist->at(list_index)->parent;
+	int &parent_vertexID = instance[parent_patternID];
+	int &child_patternID = dfslist->at(list_index)->child;
+	int &edge_label = dfslist->at(list_index)->edge_label;
 
-	for (const auto &child : q.replica->adj_list[instance[dfslist->at(list_index)->parent]])
+	for (const auto &child : q.replica->adj_list[parent_vertexID])
 	{
 		/*"child" iterates over all valid mappings of children of the replica vertex, 
 		chosen as the mappping of its parent in the (possible) instance under consideration*/
@@ -1029,12 +1151,13 @@ void print_pattern(vector<vector<pair<int, int>>> &graph, vector<int> &vertices_
 			cout << nbr.first << "(" << nbr.second << ") ";
 		cout << "\n";
 	}
+	cout << "Labels:\n";
 	for (int i = 0; i < graph.size(); i++)
 	{
-		cerr << vertices_to_labels[i] << ": ";
+		cout << vertices_to_labels[i] << ": ";
 		for (auto &nbr : graph[i])
-			cerr << vertices_to_labels[nbr.first] << " ";
-		cerr << "\n";
+			cout << vertices_to_labels[nbr.first] << " ";
+		cout << "\n";
 	}
 }
 
@@ -1060,5 +1183,5 @@ void write_pattern(vector<vector<pair<int, int>>> &graph, vector<int> &vertices_
 			out_ << vertices_to_labels[nbr.first] << " ";
 		out_ << "\n";
 	}
-	out_ << "-----------------------------------------\n";
+	out_ << "---------------------------------------------------------------------\n";
 }

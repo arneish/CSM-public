@@ -2,11 +2,9 @@
 #include <algorithm>
 #include <iostream>
 #include <stdio.h>
-#include <bits/stdc++.h>
 #include <cstdio>
 #include <ctime>
-#include "DFScode-feb-22.h"
-#include "csm.h"
+#include "DFScode.h"
 
 using namespace std;
 
@@ -68,8 +66,6 @@ DFSCode DFSCode::MinDFS(DFSCode D[], int size)
         {
             if (D[i].dfslist.at(j) < ret.dfslist.at(j))
             {
-                //based on the ASSUMPTION that arithmetic comparison equivalent to DFS code comparison rules
-                //NEEDS TO BE VERIFIED once for all 8 conditions on pg. 10
                 ret = D[i];
                 break;
             }
@@ -111,7 +107,7 @@ DFSCode* DFSCode::GlobalMin(vector<vector<pair<int, int>>> &graph, vector<int> &
 
 vector<int> DFSCode::right_path()
 {
-    vector<DFSCodeNode> v = this->dfslist;
+    vector<DFSCodeNode> &v = this->dfslist;
     int counter = -1;
     int search = 0, idtoadd = -1;
     vector<int> result;

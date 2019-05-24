@@ -1,7 +1,6 @@
 /* 
  * File:   DFScode.h
- * Author: arneish
- *
+ * Author: Arneish Prateek
  * Created on 19 February, 2018, 10:19 PM
  */
 
@@ -58,8 +57,6 @@ struct DFSCodeNode
     string show()
     {
         string s = to_string(a) + ',' + to_string(b) + ',' + to_string(la) + ',' + to_string(lab) + ',' + to_string(lb) + '.';
-        // cerr << a << "," << b << "," << la << "," << lab << "," << lb << ": (" << vid_a << ", " << vid_b <<")\n";
-        // cerr << "min-DFS edge-label: " << s << "\n";
         return s;
     }
 };
@@ -91,23 +88,8 @@ class DFSCode
             else
                 return 0;
         }
-
-        //count<<" BOOL-OP FOR DFSCode unequal size!-ERROR FOR INTER-DFS"<<endl;
         return dfslist.size() > o.dfslist.size();
     }
-    // < USED FOR INTRA-DFS CODE -- note that definition for unequal size is CHANGED!
-
-    //    bool operator < (const DFSCode &o) const
-    //    {
-    //		int minsize = min(dfslist.size(), o.dfslist.size());
-    //		for (int i = 0;i < minsize;i++){
-    //                    if (dfslist[i] < o.dfslist[i]) return 1;
-    //                    else if (dfslist[i] == o.dfslist[i]) continue;
-    //                    else return 0;
-    //                }
-    //		return dfslist.size() > o.dfslist.size();
-    //    }
-
     bool operator==(const DFSCode &o) const
     {
         if (dfslist.size() != o.dfslist.size())
@@ -116,8 +98,6 @@ class DFSCode
             if (!(dfslist[i] == o.dfslist[i]))
                 return 0;
         return 1;
-        /*if (dfsCodeList.size() != o.dfsCodeList.size()) return 0;
-		return (!(*this < o)) && (!(o < *this));*/
     }
 };
 
